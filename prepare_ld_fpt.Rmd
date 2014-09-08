@@ -1,0 +1,212 @@
+# Clean and check raw tables, then build out tables for subsequent analysis
+
+Set knitr options:
+
+```{r}
+require(knitr)
+opts_knit$set(root.dir='~/Data/Currensee/tables-2014/Rds')
+```
+
+Load data:
+
+```{r}
+library(data.table)
+
+setwd('~/Data/Currensee/tables-2014/Rds')
+
+rm(list=ls())
+options(max.print=2000)
+```
+
+Load broker accounts table, to get broker account/user mapping
+
+```{r}
+ba <- readRDS('BrokerAccount.Rds')
+ba <- ba[,list(brokerAccount_id=id, user_id, baseCurrency)]
+setkey(ba,brokerAccount_id)
+```
+
+Load forex position tracker table, for the meat of the problem.
+Drop a bunch of (apparently) useless columns.
+
+```{r}
+# make fpt
+fpt <- readRDS('ForexPositionTracker.Rds')
+# fpt[,c('version','correlationId','position_id','original_id','residual_id',
+#        'followedClose','brokerOrderId','stopEnterPrice','rollovers',
+#        'dollarPnlExclusions','pipsPnl','closeExecutionCount',
+#        'followedTrade_id','openBrokerTradePositionId','closeBrokerTradePositionId',
+#        'openPersistTime','closePersistTime') := NULL]
+fpt[,c('version','correlationId','position_id','original_id','residual_id',
+       'followedClose','brokerOrderId','stopEnterPrice','rollovers',
+       'dollarPnlExclusions','pipsPnl','closeExecutionCount',
+       'followedTrade_id','openBrokerTradePositionId','closeBrokerTradePositionId',
+       'openPersistTime','closePersistTime') := NULL]
+# fpt <- fpt[status=='CLOSED', !"status", with=FALSE]
+gc()
+```
+
+Merge in user ids
+
+```{r}
+# add in user ids everywhere...
+setkey(fpt, brokerAccount_id)
+fpt <- merge(fpt, ba, all.x=TRUE)
+stopifnot(all(fpt[,!is.na(user_id)]))
+```
+
+Find out how we can track followed trades
+
+```{r}
+# inspect close/open Cause_ids
+# 3306275 total: 2.87 mil std follow, 432k nothing, 391 ended relationship, 134 ext close, 800 drawdown
+summary(fpt[openCause_id == closeCause_id])
+# 1218 total: 1067 std follow, 151 nothing
+summary(fpt[openCause_id != closeCause_id])
+# 4709250 total: 4.708 mil nothing, 473 ext close, 330 user init
+summary(fpt[is.na(openCause_id) & is.na(closeCause_id)])
+# 425 total: 425 std follow
+summary(fpt[is.na(openCause_id) & !is.na(closeCause_id)])
+# 103497 total: 50k nothing, 13k ended relationship, 17k drawdown, 20k ext close
+summary(fpt[!is.na(openCause_id) & is.na(closeCause_id)])
+
+# check that openCause_ids map into fpt ids
+setkey(fpt,id)
+fpt.follower <- fpt[!is.na(openCause_id)]
+oc.ids <- fpt.follower[, openCause_id]
+fpt.followed <- fpt[J(oc.ids)]
+stopifnot(length(oc.ids) == nrow(fpt.followed))
+# this includes ~ 7218 open originating trades
+
+# some summary stats
+# 127 unique trade leaders, 3308 followers, 10289 total users
+length(fpt.followed[, unique(user_id)])
+length(fpt.follower[, unique(user_id)])
+length(fpt[, unique(user_id)])
+```
+
+## Make trade leader event series
+----------
+
+Get list of all follower trades along with info about who was followed.
+
+```{r}
+followed.info <- fpt.followed[, list(openCause_id=id, tl_user_id=user_id, tl_baid=brokerAccount_id,
+                                     tl_commission=commission)]
+setkey(followed.info, openCause_id)
+followed.info <- unique(followed.info)
+setkey(fpt.follower, openCause_id)
+fpt.follower <- merge(fpt.follower, followed.info, all.x=TRUE)
+```
+
+How many broker account - broker account dyads are there? How many user-user?
+
+```{r}
+ba.dyads <- fpt.follower[, list(N=.N), by=list(brokerAccount_id, tl_baid)]
+user.dyads <- fpt.follower[, list(N=.N), by=list(user_id, tl_user_id)]
+
+ba.reasons <- fpt.follower[, list(N=.N,
+                                  minotime=min(openTime, na.rm=TRUE),
+                                  minctime=min(closeTime, na.rm=TRUE),
+                                  maxotime=max(openTime, na.rm=TRUE),
+                                  maxctime=max(closeTime, na.rm=TRUE)
+                                  ), by=list(brokerAccount_id, tl_baid, closureReason)]
+user.reasons <- fpt.follower[, list(N=.N,
+                                    minotime=min(openTime, na.rm=TRUE),
+                                    minctime=min(closeTime, na.rm=TRUE),
+                                    maxotime=max(openTime, na.rm=TRUE),
+                                    maxctime=max(closeTime, na.rm=TRUE)
+                                    ), by=list(user_id, tl_user_id, closureReason)]
+
+summary(ba.reasons)
+summary(user.reasons)
+
+setkey(ba.reasons, brokerAccount_id, tl_baid)
+setkey(user.reasons, user_id, tl_user_id)
+
+summary(fpt.follower[closureReason=='', openTime])
+summary(fpt.follower[closureReason!='', openTime])
+
+```
+
+
+
+```{r, eval=FALSE}
+# setnames(fpt, c('openPrice','openTime','closePrice','closeTime',
+#            'dollarPnl','tradePnl','openBalance'),
+#          c('openprice','opendate','closeprice','closedate',
+#            'dollarpnl','tradepnl','openbalance'))
+# fpt[,longtr := 2 * as.numeric(direction=='LONG') - 1]
+# fpt[,clopdiff := closeprice - openprice]
+# fpt[,pctreturn := (clopdiff / openprice) * longtr]
+# fpt <- fpt[!is.na(pctreturn)]
+
+# split out follower trades
+fpt.f <- fpt[!is.na(openCause_id) | !is.na(closeCause_id)]
+fpt <- fpt[is.na(openCause_id) & is.na(closeCause_id)]
+fpt <- fpt[closureReason == '']
+fpt.f[is.na(openCause_id), openCause_id := closeCause_id]
+setkey(fpt,id)
+
+fpt.f2 <- fpt.f[,list(followers = .N), by=list(id=openCause_id)]
+setkey(fpt.f2,id)
+
+fpt <- merge(fpt,fpt.f2,all.x=TRUE)
+fpt[,indeptrade := as.numeric(is.na(followers))]
+
+# merge in user ids
+setkey(fpt,brokerAccount_id)
+fpt <- merge(fpt,ba,all.x=TRUE)
+
+# save and clean
+saveRDS(fpt,'../../forexposition.Rds')
+rm(fpt, fpt.f, fpt.f2); gc()
+
+
+
+# make dbap
+dbap <- readRDS('DailyBrokerAccountPerformance.Rds')
+dbap[,c('version','intraDayHigh','intraDayLow','maxDD','peakHigh','peakLow',
+        'todateClosedRoi','todateNetRoi') := NULL]
+
+# merge in user ids
+setkey(dbap,brokerAccount_id)
+dbap <- merge(dbap,ba,all.x=TRUE)
+
+# save and clean
+saveRDS(dbap,'../../dailybrokeraccount.Rds')
+rm(dbap); gc()
+
+
+
+
+
+# make ld
+fl <- readRDS('FriendLink.Rds')
+um <- readRDS('UserMessage.Rds')
+
+fl[,c('id','version') := NULL]
+um <- um[type=='FRIEND_LINK_REQUEST',list(sender_id, recipient_id, senddate=sendDate)]
+setnames(fl,c('friend1_id','friend2_id'),
+         c('user_id','alter_id'))
+setnames(um,c('sender_id','recipient_id'),
+         c('user_id','alter_id'))
+
+# symmetrize
+fl <- rbind(fl,fl[,list(user_id=alter_id, alter_id=user_id)], use.names=TRUE)
+um <- rbind(um,um[,list(user_id=alter_id, alter_id=user_id, senddate)], use.names=TRUE)
+
+# take last date by friendship
+um <- um[,list(senddate=max(senddate)), by=list(user_id,alter_id)]
+
+# merge in dates...
+setkey(fl,user_id,alter_id)
+setkey(um,user_id,alter_id)
+ld <- merge(fl,um,all.x=TRUE)
+
+ld <- ld[!is.na(senddate)]
+
+# save and clean
+saveRDS(ld,'../../linkdata.Rds')
+rm(fl, um, ld); gc()
+```
