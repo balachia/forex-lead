@@ -17,7 +17,7 @@ library(parallel)
 setwd('~/Data/Currensee/tables-2014/Rds')
 
 rm(list=ls())
-options(max.print=2000)
+options(max.print=10000)
 ```
 
 Load broker accounts table, to get broker account/user mapping
@@ -75,6 +75,7 @@ summary(fpt[!is.na(openCause_id) & is.na(closeCause_id)])
 # check that openCause_ids map into fpt ids
 setkey(fpt,id)
 fpt.follower <- fpt[!is.na(openCause_id)]
+fpt.follower[, closureReason := as.factor(closureReason)]
 oc.ids <- fpt.follower[, openCause_id]
 fpt.followed <- fpt[J(oc.ids)]
 stopifnot(length(oc.ids) == nrow(fpt.followed))
@@ -114,63 +115,82 @@ How many broker account - broker account dyads are there? How many user-user?
 ba.dyads <- fpt.follower[, list(N=.N), by=list(brokerAccount_id, tl_baid)]
 user.dyads <- fpt.follower[, list(N=.N), by=list(user_id, tl_user_id)]
 
+ptm <- proc.time()
 tl_baids <- ba.dyads[, unique(tl_baid)]
-resdts <- mclapply(tl_baids, mc.cores=1,
+resdts <- mclapply(tl_baids, mc.cores=20,
+    mc.preschedule=FALSE,
     FUN=function(tl.baid) {
-    print(which(tl_baids==tl.baid))
+#     print(which(tl_baids==tl.baid))
 
-    user.fpt <- fpt.follower[tl_baid == tl.baid, 
-                             list(openCause_id, brokerAccount_id,
-                                  openTime, closeTime,
-                                  closureReason, user_id, tl_user_id,
-                                  NA.C=closureReason=='',
-                                  SF.C=closureReason=='STANDARD_FOLLOW',
-                                  ER.C=closureReason=='ENDED_RELATIONSHIP',
-                                  DD.C=closureReason=='VMC_DRAWDOWN',
-                                  OD.C=closureReason=='VMC_OPEN_DRAWDOWN',
-                                  EC.C=closureReason=='EXTERNAL_CLOSE',
-                                  UI.C=closureReason=='USER_INITIATED'
+#     user.fpt <- fpt.follower[tl_baid==tl.baid,
+#                              !c('version','correlationId',
+#                                 'openPrice','openTime','closePrice','closeTime',
+#                                 'original_id','residual_id','volume',
+#                                 'currency1','currency2','direction'
+#                                 'takeProfit','stopLoss','openBalance',
+#                                 'tradePnl','commission','baseCurrency'),
+#                              with=FALSE]
+    user.fpt <- fpt.follower[tl_baid==tl.baid,
+                             list(brokerAccount_id, openCause_id,
+                                  id, openTime, closeTime,
+                                  status, closureReason,
+                                  user_id
                                   )]
-    user.fpt <- fpt.follower[tl_baid==tl.baid]
-    user.fpt[, `:=`( NA.C=closureReason=='',
-                    SF.C=closureReason=='STANDARD_FOLLOW',
-                    ER.C=closureReason=='ENDED_RELATIONSHIP',
-                    DD.C=closureReason=='VMC_DRAWDOWN',
-                    OD.C=closureReason=='VMC_OPEN_DRAWDOWN',
-                    EC.C=closureReason=='EXTERNAL_CLOSE',
-                    UI.C=closureReason=='USER_INITIATED')]
+    user.fpt[, `:=`(N=.N,
+                    Nreason=length(unique(closureReason)),
+                    NA.C=any(closureReason==''),
+                    SF.C=any(closureReason=='STANDARD_FOLLOW'),
+                    ER.C=any(closureReason=='ENDED_RELATIONSHIP'),
+                    DD.C=any(closureReason=='VMC_DRAWDOWN'),
+                    OD.C=any(closureReason=='VMC_OPEN_DRAWDOWN'),
+                    EC.C=any(closureReason=='EXTERNAL_CLOSE'),
+                    UI.C=any(closureReason=='USER_INITIATED')
+                    ), 
+                   by=list(brokerAccount_id, openCause_id)]
+#     bads <- user.fpt[N > 1 & Nreason > 1]
     setkey(user.fpt,brokerAccount_id,openCause_id)
+    user.fpt <- unique(user.fpt)
+#     user.fpt[, `:=`( NA.C=closureReason=='',
+#                     SF.C=closureReason=='STANDARD_FOLLOW',
+#                     ER.C=closureReason=='ENDED_RELATIONSHIP',
+#                     DD.C=closureReason=='VMC_DRAWDOWN',
+#                     OD.C=closureReason=='VMC_OPEN_DRAWDOWN',
+#                     EC.C=closureReason=='EXTERNAL_CLOSE',
+#                     UI.C=closureReason=='USER_INITIATED')]
     # apparently we have to check for duplicates in the user fpt field
     # i.e. some users have multiple records corresponding to a single
     # open trade leader order
-    # hopefully this is just some currensee debugging shit
-    bads <- NULL
-    if(any(duplicated(user.fpt))) {
-#         cat('\n\nduplicated entries, distinct closure\n')
-        user.fpt.dups <- user.fpt
-        user.fpt.dups[, `:=`(N=.N,
-                             Nreason=length(unique(closureReason))),
-                      by=list(brokerAccount_id, openCause_id)]
-#         print(user.fpt.dups[ N > 1 & Nreason > 1])
-        bads <- user.fpt.dups[N > 1 & Nreason > 1]
-        user.fpt[, `:=`(NA.C=any(closureReason==''),
-                        SF.C=any(closureReason=='STANDARD_FOLLOW'),
-                        ER.C=any(closureReason=='ENDED_RELATIONSHIP'),
-                        DD.C=any(closureReason=='VMC_DRAWDOWN'),
-                        OD.C=any(closureReason=='VMC_OPEN_DRAWDOWN'),
-                        EC.C=any(closureReason=='EXTERNAL_CLOSE'),
-                        UI.C=any(closureReason=='USER_INITIATED')
-                        ), 
-                 by=list(brokerAccount_id, openCause_id)]
-        user.fpt <- unique(user.fpt)
-    } else {
-        user.fpt[, `:=`(N=1,Nreason=1)]
-    }
+    # hopefully this is just some company debugging shit
+    # nope: looks like the company regularly splits follower orders into multiple batches
+    # no clue why... nothing in ToS
+#     bads <- NULL
+#     if(any(duplicated(user.fpt))) {
+# #         cat('\n\nduplicated entries, distinct closure\n')
+#         user.fpt.dups <- user.fpt
+#         user.fpt.dups[, `:=`(N=.N,
+#                              Nreason=length(unique(closureReason))),
+#                       by=list(brokerAccount_id, openCause_id)]
+# #         print(user.fpt.dups[ N > 1 & Nreason > 1])
+#         bads <- user.fpt.dups[N > 1 & Nreason > 1]
+#         user.fpt[, `:=`(NA.C=any(closureReason==''),
+#                         SF.C=any(closureReason=='STANDARD_FOLLOW'),
+#                         ER.C=any(closureReason=='ENDED_RELATIONSHIP'),
+#                         DD.C=any(closureReason=='VMC_DRAWDOWN'),
+#                         OD.C=any(closureReason=='VMC_OPEN_DRAWDOWN'),
+#                         EC.C=any(closureReason=='EXTERNAL_CLOSE'),
+#                         UI.C=any(closureReason=='USER_INITIATED')
+#                         ), 
+#                  by=list(brokerAccount_id, openCause_id)]
+#         user.fpt <- unique(user.fpt)
+#     } else {
+#         user.fpt[, `:=`(N=1,Nreason=1)]
+#     }
 
     tl.fpt <- fpt[brokerAccount_id == tl.baid,
-                  list(tl_baid=brokerAccount_id,
-                       openCause_id=id,
-                       currency1, currency2, direction,
+                  list(openCause_id=id,
+                       tl_baid=brokerAccount_id,
+                       tl_user_id=user_id,
+#                        currency1, currency2, direction,
                        tl_status=status)]
     setkey(tl.fpt,openCause_id)
 
@@ -183,31 +203,158 @@ resdts <- mclapply(tl_baids, mc.cores=1,
     setkey(tl.grid,brokerAccount_id,openCause_id)
     tl.grid <- merge(tl.grid,user.fpt,all.x=TRUE)
 
-    list(tl.grid, bads)
-})
+    cat(which(tl_baids==tl.baid), '::', object.size(tl.grid) / (2^20), 'Mb\n')
 
-all.bads <- lapply(resdts, function(dt.list) dt.list[[2]])
-all.grids <- lapply(resdts, function(dt.list) dt.list[[1]])
+#     list(tl.grid, bads)
+    tl.grid
+})
+print(proc.time() - ptm)
+
+system.time(all.grids <- rbindlist(resdts))
+setkey(all.grids, tl_baid, brokerAccount_id)
+
+# all.grids <- lapply(resdts, function(dt.list) dt.list[[1]])
+# all.bads <- lapply(resdts, function(dt.list) dt.list[[2]])
 
 #temporary fixer upper:
-all.grids <- lapply(all.grids, function(x) {
-    if(!('N' %in% names(x))) {
-        x[, `:=`(N=1,Nreason=1)]
-    }
-    x
-})
+# all.grids <- lapply(all.grids, function(x) {
+#     if(!('N' %in% names(x))) {
+#         x[, `:=`(N=1,Nreason=1)]
+#     }
+#     x
+# })
 
-all.bads <- rbindlist(all.bads)
+# system.time(all.bads <- rbindlist(all.bads))
+# system.time(all.bads <- Reduce(rbind,all.bads))
 # this shit has a bug, using do.call rbind instead
 # which also has a bug, what the ever-loving fuck
 # let's try reduce???
 # "length 1364523120 is too large for hashing"
 # all.grids <- rbindlist(all.grids)
 # all.grids <- do.call(rbind,all.grids)
-all.grids <- Reduce(rbind,all.grids)
+# system.time(all.grids <- Reduce(rbind,all.grids))
+
+# tabulate quit reasons
+closure.reasons <- all.grids[, list(N=.N,Nreason=min(Nreason)),
+                             by=list(NA.C,SF.C,ER.C,DD.C,OD.C,EC.C,UI.C)]
+closure.reasons <- closure.reasons[order(closure.reasons$Nreason, -closure.reasons$N)]
+closure.reasons[, reasons := paste0(c('','.')[NA.C + 1],
+                                    c('','-')[SF.C + 1],
+                                    c('','R')[ER.C + 1],
+                                    c('','D')[DD.C + 1],
+                                    c('','O')[OD.C + 1],
+                                    c('','X')[EC.C + 1],
+                                    c('','U')[UI.C + 1])]
+closure.reasons[is.na(NA.C), reasons := '']
+
+all.grids[Nreason > 0, reasons := paste0(c('','.')[NA.C + 1],
+                                         c('','-')[SF.C + 1],
+                                         c('','R')[ER.C + 1],
+                                         c('','D')[DD.C + 1],
+                                         c('','O')[OD.C + 1],
+                                         c('','X')[EC.C + 1],
+                                         c('','U')[UI.C + 1])]
+# all.grids[, reasons := paste0(ifelse(NA.C,'.',''),
+#                               ifelse(SF.C,'-',''),
+#                               ifelse(ER.C,'R',''),
+#                               ifelse(DD.C,'D',''),
+#                               ifelse(OD.C,'O',''),
+#                               ifelse(EC.C,'X',''),
+#                               ifelse(UI.C,'U','')
+#                               )]
+all.grids[is.na(NA.C), reasons := '']
+all.grids[, reasons := as.factor(reasons)]
+
+# merge in trade leader open time
+tl.open.times <- fpt[, list(openCause_id=id, tl_openTime = openTime)]
+setkey(tl.open.times)
+setkey(all.grids,openCause_id)
+all.grids <- merge(all.grids,tl.open.times, all.x=TRUE)
+setkey(all.grids, tl_baid, brokerAccount_id)
+
+# split to single stream
+all.tl.opens <- all.grids[, list(brokerAccount_id, tl_baid, etime=tl_openTime,
+                                 type='BO',
+                                 openCause_id, id=openCause_id,
+                                 user_id, tl_user_id,
+                                 reasons)]
+all.user.opens <- all.grids[!is.na(openTime), list(brokerAccount_id, tl_baid, etime=openTime,
+                                                   type='UO',
+                                                   openCause_id, id,
+                                                   user_id, tl_user_id,
+                                                   reasons)]
+all.user.closes <- all.grids[!is.na(closeTime), list(brokerAccount_id, tl_baid, etime=closeTime,
+                                                     type='UC',
+                                                     openCause_id, id,
+                                                     user_id, tl_user_id,
+                                                     reasons)]
+tl.events <- rbind(all.tl.opens, all.user.opens, all.user.closes)
+tl.events[, type := as.factor(type)]
+setkey(tl.events, brokerAccount_id, tl_baid, etime)
+
+rm(all.tl.opens, all.user.opens, all.user.closes)
+# rm(resdts, all.grids)
+
+# drop initial part of stream
+# i.e. all broker events before the user's first action
+tl.events[, nuserevents := cumsum(type != 'BO'), by=list(brokerAccount_id, tl_baid)]
+tl.events <- tl.events[nuserevents > 0, !'nuserevents', with=FALSE]
+
+# gotta figure out if certain broker trades are just never followed by anybody
+tl.follows <- tl.events[type != 'BO', list(nfollows = .N), by=openCause_id]
+setkey(tl.events, openCause_id)
+setkey(tl.follows, openCause_id)
+tl.events <- merge(tl.events, tl.follows, all.x=TRUE)
+tl.events[is.na(nfollows), nfollows := 0]
+
+# drop broker opens with no follows?
+tl.events <- tl.events[nfollows > 0]
+
+# get runs of blanks (calling it a segment)
+# ensure sorting by time first
+tl.events[, newsegment := xor(is.na(user_id),
+                              is.na(c(NA,head(user_id,-1)))),
+          by=list(brokerAccount_id, tl_baid)]
+tl.events[, segmentid := cumsum(newsegment),
+          by=list(brokerAccount_id, tl_baid)]
+tl.events[, `:=`(segment.nofollow = is.na(user_id[1]),
+                 segment.length = .N),
+          by=list(brokerAccount_id, tl_baid, segmentid)]
+segment.stats <- tl.events[, list(segment.nofollow=segment.nofollow[1],
+                                  segment.length=segment.length[1],
+                                  seg.tdiff=(etime[.N]-etime[1])/86400000),
+                           by=list(brokerAccount_id, tl_baid, segmentid)]
+segment.stats[, followsleft := Reduce('+',
+                                      as.numeric(!segment.nofollow),
+                                      accumulate=TRUE,right=TRUE),
+              by=list(brokerAccount_id, tl_baid)]
+
+table(segment.stats[(segment.nofollow), followsleft>0])
+txtdensity(segment.stats[segment.nofollow & followsleft > 0, seg.tdiff])
+txtdensity(segment.stats[segment.nofollow & followsleft == 0, seg.tdiff])
+quantile(segment.stats[segment.nofollow & followsleft > 0, seg.tdiff],
+         seq(0,1,0.01))
+quantile(segment.stats[segment.nofollow & followsleft == 0, seg.tdiff],
+         seq(0,1,0.01))
+
+# classify segments
+segment.stats[, relation.break := ]
 
 
 
+# setkey(tl.events, id)
+# addend.data <- fpt[, list(id, version, cp=paste0(currency1,currency2))]
+# setkey(addend.data, id)
+# tl.events <- merge(tl.events, addend.data, all.x=TRUE) 
+
+
+setkey(tl.events, brokerAccount_id, tl_baid, etime)
+
+```
+
+
+
+```{r, eval=FALSE}
 ba.reasons <- fpt.follower[, list(N=.N,
                                   minotime=min(openTime, na.rm=TRUE),
                                   minctime=min(closeTime, na.rm=TRUE),
