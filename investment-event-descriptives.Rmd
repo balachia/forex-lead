@@ -1,0 +1,24 @@
+# Descriptive Statistics for Investment Events
+
+Set knitr and global options, and load packages.
+
+```{r}
+require(knitr)
+opts_knit$set(root.dir='~/Data/Currensee/')
+setwd('~/Data/Currensee')
+```
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(txtplot)
+library(reshape2)
+
+rm(list=ls())
+options(max.print=5000)
+```
+
+```{r}
+investment.events <- readRDS('Rds/investment-events.Rds')
+
+```

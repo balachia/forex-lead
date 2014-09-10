@@ -13,6 +13,7 @@ Load data:
 library(data.table)
 library(reshape2)
 library(parallel)
+library(txtplot)
 
 setwd('~/Data/Currensee/tables-2014/Rds')
 
@@ -31,7 +32,7 @@ setkey(ba,brokerAccount_id)
 Load forex position tracker table, for the meat of the problem.
 Drop a bunch of (apparently) useless columns.
 
-```{r}
+```{r, cache=TRUE}
 # make fpt
 fpt <- readRDS('ForexPositionTracker.Rds')
 # fpt[,c('version','correlationId','position_id','original_id','residual_id',
@@ -59,7 +60,7 @@ stopifnot(all(fpt[,!is.na(user_id)]))
 
 Find out how we can track followed trades
 
-```{r}
+```{r, cache=TRUE}
 # inspect close/open Cause_ids
 # 3306275 total: 2.87 mil std follow, 432k nothing, 391 ended relationship, 134 ext close, 800 drawdown
 summary(fpt[openCause_id == closeCause_id])
@@ -93,7 +94,7 @@ length(fpt[, unique(user_id)])
 
 Get list of all follower trades along with info about who was followed.
 
-```{r}
+```{r, cache=TRUE}
 followed.info <- fpt.followed[, list(openCause_id=id, tl_user_id=user_id, tl_baid=brokerAccount_id,
                                      tl_commission=commission)]
 setkey(followed.info, openCause_id)
@@ -101,17 +102,17 @@ followed.info <- unique(followed.info)
 setkey(fpt.follower, openCause_id)
 fpt.follower <- merge(fpt.follower, followed.info, all.x=TRUE)
 
-fpt.follower.short <- fpt.follower[, list(id, brokerAccount_id, user_id,
-#                                           openTime, closeTime,
-                                          openDay=floor(openTime / 86400000),
-                                          closeDay=floor(closeTime / 86400000),
-                                          cp=paste0(currency1,currency2),direction,status,
-                                          closureReason, tl_user_id, tl_baid)]
+# fpt.follower.short <- fpt.follower[, list(id, brokerAccount_id, user_id,
+# #                                           openTime, closeTime,
+#                                           openDay=floor(openTime / 86400000),
+#                                           closeDay=floor(closeTime / 86400000),
+#                                           cp=paste0(currency1,currency2),direction,status,
+#                                           closureReason, tl_user_id, tl_baid)]
 ```
 
 How many broker account - broker account dyads are there? How many user-user?
 
-```{r}
+```{r, cache=TRUE}
 ba.dyads <- fpt.follower[, list(N=.N), by=list(brokerAccount_id, tl_baid)]
 user.dyads <- fpt.follower[, list(N=.N), by=list(user_id, tl_user_id)]
 
@@ -120,16 +121,6 @@ tl_baids <- ba.dyads[, unique(tl_baid)]
 resdts <- mclapply(tl_baids, mc.cores=20,
     mc.preschedule=FALSE,
     FUN=function(tl.baid) {
-#     print(which(tl_baids==tl.baid))
-
-#     user.fpt <- fpt.follower[tl_baid==tl.baid,
-#                              !c('version','correlationId',
-#                                 'openPrice','openTime','closePrice','closeTime',
-#                                 'original_id','residual_id','volume',
-#                                 'currency1','currency2','direction'
-#                                 'takeProfit','stopLoss','openBalance',
-#                                 'tradePnl','commission','baseCurrency'),
-#                              with=FALSE]
     user.fpt <- fpt.follower[tl_baid==tl.baid,
                              list(brokerAccount_id, openCause_id,
                                   id, openTime, closeTime,
@@ -147,44 +138,14 @@ resdts <- mclapply(tl_baids, mc.cores=20,
                     UI.C=any(closureReason=='USER_INITIATED')
                     ), 
                    by=list(brokerAccount_id, openCause_id)]
-#     bads <- user.fpt[N > 1 & Nreason > 1]
     setkey(user.fpt,brokerAccount_id,openCause_id)
     user.fpt <- unique(user.fpt)
-#     user.fpt[, `:=`( NA.C=closureReason=='',
-#                     SF.C=closureReason=='STANDARD_FOLLOW',
-#                     ER.C=closureReason=='ENDED_RELATIONSHIP',
-#                     DD.C=closureReason=='VMC_DRAWDOWN',
-#                     OD.C=closureReason=='VMC_OPEN_DRAWDOWN',
-#                     EC.C=closureReason=='EXTERNAL_CLOSE',
-#                     UI.C=closureReason=='USER_INITIATED')]
     # apparently we have to check for duplicates in the user fpt field
     # i.e. some users have multiple records corresponding to a single
     # open trade leader order
     # hopefully this is just some company debugging shit
     # nope: looks like the company regularly splits follower orders into multiple batches
     # no clue why... nothing in ToS
-#     bads <- NULL
-#     if(any(duplicated(user.fpt))) {
-# #         cat('\n\nduplicated entries, distinct closure\n')
-#         user.fpt.dups <- user.fpt
-#         user.fpt.dups[, `:=`(N=.N,
-#                              Nreason=length(unique(closureReason))),
-#                       by=list(brokerAccount_id, openCause_id)]
-# #         print(user.fpt.dups[ N > 1 & Nreason > 1])
-#         bads <- user.fpt.dups[N > 1 & Nreason > 1]
-#         user.fpt[, `:=`(NA.C=any(closureReason==''),
-#                         SF.C=any(closureReason=='STANDARD_FOLLOW'),
-#                         ER.C=any(closureReason=='ENDED_RELATIONSHIP'),
-#                         DD.C=any(closureReason=='VMC_DRAWDOWN'),
-#                         OD.C=any(closureReason=='VMC_OPEN_DRAWDOWN'),
-#                         EC.C=any(closureReason=='EXTERNAL_CLOSE'),
-#                         UI.C=any(closureReason=='USER_INITIATED')
-#                         ), 
-#                  by=list(brokerAccount_id, openCause_id)]
-#         user.fpt <- unique(user.fpt)
-#     } else {
-#         user.fpt[, `:=`(N=1,Nreason=1)]
-#     }
 
     tl.fpt <- fpt[brokerAccount_id == tl.baid,
                   list(openCause_id=id,
@@ -205,34 +166,12 @@ resdts <- mclapply(tl_baids, mc.cores=20,
 
     cat(which(tl_baids==tl.baid), '::', object.size(tl.grid) / (2^20), 'Mb\n')
 
-#     list(tl.grid, bads)
     tl.grid
 })
 print(proc.time() - ptm)
 
 system.time(all.grids <- rbindlist(resdts))
 setkey(all.grids, tl_baid, brokerAccount_id)
-
-# all.grids <- lapply(resdts, function(dt.list) dt.list[[1]])
-# all.bads <- lapply(resdts, function(dt.list) dt.list[[2]])
-
-#temporary fixer upper:
-# all.grids <- lapply(all.grids, function(x) {
-#     if(!('N' %in% names(x))) {
-#         x[, `:=`(N=1,Nreason=1)]
-#     }
-#     x
-# })
-
-# system.time(all.bads <- rbindlist(all.bads))
-# system.time(all.bads <- Reduce(rbind,all.bads))
-# this shit has a bug, using do.call rbind instead
-# which also has a bug, what the ever-loving fuck
-# let's try reduce???
-# "length 1364523120 is too large for hashing"
-# all.grids <- rbindlist(all.grids)
-# all.grids <- do.call(rbind,all.grids)
-# system.time(all.grids <- Reduce(rbind,all.grids))
 
 # tabulate quit reasons
 closure.reasons <- all.grids[, list(N=.N,Nreason=min(Nreason)),
@@ -254,14 +193,6 @@ all.grids[Nreason > 0, reasons := paste0(c('','.')[NA.C + 1],
                                          c('','O')[OD.C + 1],
                                          c('','X')[EC.C + 1],
                                          c('','U')[UI.C + 1])]
-# all.grids[, reasons := paste0(ifelse(NA.C,'.',''),
-#                               ifelse(SF.C,'-',''),
-#                               ifelse(ER.C,'R',''),
-#                               ifelse(DD.C,'D',''),
-#                               ifelse(OD.C,'O',''),
-#                               ifelse(EC.C,'X',''),
-#                               ifelse(UI.C,'U','')
-#                               )]
 all.grids[is.na(NA.C), reasons := '']
 all.grids[, reasons := as.factor(reasons)]
 
@@ -293,8 +224,25 @@ tl.events[, type := as.factor(type)]
 setkey(tl.events, brokerAccount_id, tl_baid, etime)
 
 rm(all.tl.opens, all.user.opens, all.user.closes)
-# rm(resdts, all.grids)
+rm(resdts, all.grids)
 
+saveRDS(tl.events, '../../Rds/all-trade-leader-events.Rds', compress=FALSE)
+```
+
+Augment the stream of trade events by calculating the number of followers for each trade
+and the lengths of followed and unfollowed spans of trade --
+i.e. runs of trade leader trades that were/weren't followed by the user.
+
+Exclude all trade leader trades that were followed by nobody:
+apparently some trades didn't trigger followers, for whatever reason.
+
+Finally, calculate statistics about remaining spans:
+what was the last closure reason before a span of unfollowed trades,
+what was the length of time in which trades were unfollowed?
+
+
+
+```{r, cache=TRUE}
 # drop initial part of stream
 # i.e. all broker events before the user's first action
 tl.events[, nuserevents := cumsum(type != 'BO'), by=list(brokerAccount_id, tl_baid)]
@@ -312,6 +260,7 @@ tl.events <- tl.events[nfollows > 0]
 
 # get runs of blanks (calling it a segment)
 # ensure sorting by time first
+setkey(tl.events, brokerAccount_id, tl_baid, etime)
 tl.events[, newsegment := xor(is.na(user_id),
                               is.na(c(NA,head(user_id,-1)))),
           by=list(brokerAccount_id, tl_baid)]
@@ -322,12 +271,14 @@ tl.events[, `:=`(segment.nofollow = is.na(user_id[1]),
           by=list(brokerAccount_id, tl_baid, segmentid)]
 segment.stats <- tl.events[, list(segment.nofollow=segment.nofollow[1],
                                   segment.length=segment.length[1],
-                                  seg.tdiff=(etime[.N]-etime[1])/86400000),
+                                  seg.tdiff=(etime[.N]-etime[1])/86400000,
+                                  seg.lastreasons=paste(unique(tail(reasons,3)), collapse='|')),
                            by=list(brokerAccount_id, tl_baid, segmentid)]
 segment.stats[, followsleft := Reduce('+',
                                       as.numeric(!segment.nofollow),
                                       accumulate=TRUE,right=TRUE),
               by=list(brokerAccount_id, tl_baid)]
+segment.stats[, seg.prevreasons := c(NA,head(seg.lastreasons,-1))]
 
 table(segment.stats[(segment.nofollow), followsleft>0])
 txtdensity(segment.stats[segment.nofollow & followsleft > 0, seg.tdiff])
@@ -337,19 +288,85 @@ quantile(segment.stats[segment.nofollow & followsleft > 0, seg.tdiff],
 quantile(segment.stats[segment.nofollow & followsleft == 0, seg.tdiff],
          seq(0,1,0.01))
 
-# classify segments
-segment.stats[, relation.break := ]
+# make a lift curve
+n.none <- segment.stats[segment.nofollow & followsleft == 0, .N]
+n.some <- segment.stats[segment.nofollow & followsleft > 0, .N]
+cdf.none <- ecdf(segment.stats[segment.nofollow & followsleft == 0, seg.tdiff])
+cdf.some <- ecdf(segment.stats[segment.nofollow & followsleft > 0, seg.tdiff])
 
+pt.seq <- seq(0,100,0.5)
+# false positive curve ... if classify break > n, what % remaining are misclassified
+# this is the ratio of survival curves
+txtplot(pt.seq, (n.some * (1-cdf.some(pt.seq))) /
+        ((n.some * (1-cdf.some(pt.seq))) + (n.none * (1-cdf.none(pt.seq)))),
+        ylab='False Positive')
 
+# false negative curve ... if classify break < n, what % unclassified should have been
+# this is the ratio of cdfs
+txtplot(pt.seq, (n.none * cdf.none(pt.seq)) /
+        ((n.none * cdf.none(pt.seq)) + (n.some * cdf.some(pt.seq))),
+        ylab='False Negative')
 
-# setkey(tl.events, id)
-# addend.data <- fpt[, list(id, version, cp=paste0(currency1,currency2))]
-# setkey(addend.data, id)
-# tl.events <- merge(tl.events, addend.data, all.x=TRUE) 
+segment.stats[,seg.mpreasons := sapply(seg.prevreasons, function(x) {
+        paste0('',
+               '.'[grepl('\\.',x)],
+               '-'[grepl('-',x)],
+               'R'[grepl('R',x)],
+               'D'[grepl('D',x)],
+               'O'[grepl('O',x)],
+               'X'[grepl('X',x)],
+               'U'[grepl('U',x)])
+        })]
 
+# classify segments by last close reasons
+table(segment.stats[(segment.nofollow), seg.mpreasons], segment.stats[(segment.nofollow), seg.tdiff > 0])
+table(segment.stats[(segment.nofollow), seg.mpreasons], segment.stats[(segment.nofollow), seg.tdiff > 1])
+table(segment.stats[(segment.nofollow), seg.mpreasons], segment.stats[(segment.nofollow), seg.tdiff > 10])
+table(segment.stats[(segment.nofollow), seg.mpreasons], segment.stats[(segment.nofollow), seg.tdiff > 100])
+```
 
-setkey(tl.events, brokerAccount_id, tl_baid, etime)
+Decide on the length of span that indicates a severed relationship, and drop shorter spans.
 
+Use start times of remaining spans to identify start/end times of investment relationships.
+
+```{r, cache=TRUE}
+# classify segments, make investment events
+break.relation.gap <- 10 * 86400000
+max.etime <- as.numeric(as.POSIXct('2014-01-01 24:00:00')) * 1000
+tl.events[, `:=`(first.etime=etime[1],
+                 last.etime=etime[.N],
+                 etime.gap=etime[.N] - etime[1]),
+          by=list(brokerAccount_id, tl_baid, segmentid)]
+
+# drop no-follow spans where span length <= gap
+tl.events.cleaned <- tl.events[(!segment.nofollow) | etime.gap > break.relation.gap]
+
+# recreate segment boundaries
+setkey(tl.events.cleaned, brokerAccount_id, tl_baid, etime)
+tl.events.cleaned[, newsegment := xor(is.na(user_id),
+                                      is.na(c(NA,head(user_id,-1)))),
+                  by=list(brokerAccount_id, tl_baid)]
+tl.events.cleaned[, segmentid := cumsum(newsegment),
+                  by=list(brokerAccount_id, tl_baid)]
+tl.events.cleaned[, `:=`(segment.nofollow = is.na(user_id[1]),
+                         segment.length = .N),
+                  by=list(brokerAccount_id, tl_baid, segmentid)]
+
+# pull out the investment events
+investment.events <- tl.events.cleaned[, list(etime=etime[1],
+                                              eday=etime[1] / 86400000,
+                                              isinvest=!segment.nofollow[1]),
+                                       by=list(brokerAccount_id, tl_baid, segmentid)]
+investment.events[, day := as.POSIXct(etime/1000, origin='1970-01-01')]
+
+investment.events <- merge(investment.events,
+                           ba[, list(tl_baid=brokerAccount_id, tl_user_id=user_id)],
+                           all.x=TRUE, by='tl_baid')
+investment.events <- merge(investment.events,
+                           ba[, list(brokerAccount_id, user_id)],
+                           all.x=TRUE, by='brokerAccount_id')
+
+saveRDS(investment.events, '../../Rds/investment-events.Rds', compress=FALSE)
 ```
 
 
