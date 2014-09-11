@@ -1,24 +1,164 @@
 # Descriptive Statistics for Investment Events
 
-Set knitr and global options, and load packages.
+How and when do users invest in trade leaders (TL)?
 
-```{r}
+```{r, echo=FALSE}
 require(knitr)
 opts_knit$set(root.dir='~/Data/Currensee/')
+opts_chunk$set(fig.width=8, fig.height=5)
 setwd('~/Data/Currensee')
 ```
 
-```{r}
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
 library(data.table)
 library(ggplot2)
 library(txtplot)
 library(reshape2)
+library(igraph)
 
 rm(list=ls())
 options(max.print=5000)
+
+investment.events <- readRDS('Rds/investment-events.Rds')
+ld <- readRDS('Rds/linkdata.Rds')
+
 ```
+
+The trade leader data contains `r investment.events[, length(unique(user_id))]` users
+over `r investment.events[, length(unique(brokerAccount_id))]` broker accounts,
+of a total 10289 users and 15113 broker accounts on the site.
+Investors operated 3955 total broker accounts, including some not used for TL investment.
+They invest in `r investment.events[, length(unique(tl_baid))]` trade leader accounts,
+owned by `r investment.events[, length(unique(tl_user_id))]` TLs.
+About 10% of trades made by investing accounts appear to have been made
+independently of a TL. The remainder tracked a broker position.
+
+
+### What fraction of users reinvest in a TL after uninvesting in them?
 
 ```{r}
-investment.events <- readRDS('Rds/investment-events.Rds')
+# reinvestment
+setkey(investment.events, brokerAccount_id, tl_baid, etime)
+invisible(investment.events[, reinvest := cumsum(isinvest) > 1,
+                            by=list(brokerAccount_id, tl_baid)])
+
+# how many users have reinvestment events?
+summary(investment.events[, list(any.reinvest=any(reinvest)), by=brokerAccount_id])
 
 ```
+
+Most users have only a single investment spell in any trade leader. One quarter, though,
+do appear to have multiple investment spells.
+
+### How many contemporaneous investments do users have?
+
+```{r}
+# contemporaneous investments
+setkey(investment.events, brokerAccount_id, etime)
+invisible(investment.events[, cum.investments := cumsum(2 * isinvest - 1),
+                            by=brokerAccount_id])
+
+# statistics are 'per user'
+summary(investment.events[, list(min.contemp=min(cum.investments),
+                                 max.contemp=max(cum.investments),
+                                 p25.contemp=quantile(cum.investments,0.25),
+                                 p75.contemp=quantile(cum.investments,0.75)
+                                 ), by=brokerAccount_id])
+
+```
+
+Users appear to have relatively few contemporaneous investments:
+the median user has at most 3 investments, and the 75%-ile user has at most 4
+open at any one time.
+
+### How many trade leaders does the average user broker account invest in?
+
+```{r}
+accts.invested.by.ba <- investment.events[, list(n_tl_baid=length(unique(tl_baid)),
+                                                 n_tl_user_id=length(unique(tl_user_id))),
+                                          by=brokerAccount_id]
+
+summary(accts.invested.by.ba)
+ggplot(accts.invested.by.ba, aes(n_tl_baid)) + 
+    labs(title='# of TLs (broker accounts) users invest in') + 
+    xlab('# broker accounts user invests in') +
+    geom_density()
+
+ggplot(accts.invested.by.ba, aes(n_tl_user_id)) + 
+    labs(title='# of TLs (user ids) users invest in') + 
+    xlab('# user accounts user invests in') +
+    geom_density()
+
+```
+
+Most users appear to invest in a relatively small number of TLs:
+the median user invests in 4, and the distribution is skewed towards zero.
+Still, the distribution suggests that most users do some shopping around,
+or at least have points of comparison.
+
+Note that the upper tail is dominated by Company staff --
+e.g. the top 5 users who invest in the most TL's are a Company dummy account,
+the VP of TL management, and the CEO of the company.
+
+
+### How long are investment spells?
+
+```{r}
+max.eday <- as.numeric(as.POSIXct('2014-01-01 24:00:00')) / 86400
+
+setkey(investment.events, brokerAccount_id, tl_baid, etime)
+invisible(investment.events[, spellid := cumsum(isinvest),
+                            by=list(brokerAccount_id, tl_baid)])
+spell.lengths <- investment.events[, list(completed.spell=.N==2,
+                                          spell.time=eday[.N] - eday[1],
+                                          spell.toend=max.eday - eday[1]),
+                                   by=list(brokerAccount_id, tl_baid, spellid)]
+invisible(spell.lengths[(!completed.spell), spell.time := spell.toend])
+
+# there appears to be one broken spell, reported as starting in january 1970
+# might be an off by factor of 1000 error by company
+invisible(spell.lengths[spell.time > 365 * 5, spell.time := NA])
+
+ggplot(spell.lengths, aes(x=spell.time, y=..scaled.., fill=completed.spell)) +
+    scale_fill_brewer(type='qual', name='Spell Ended?') + 
+    labs(title='Distribution of Investment Spell Length by Continuing Status') + 
+    xlab('Spell length (days)') +
+    geom_density()
+
+```
+
+Most completed spells appear to be short, as though people are trying out TLs 
+for a brief period of time. On the other hand, the data here may be falsely 
+including TL accounts that closed -- these won't register an investment closure
+event for a user, so I may need an alternative way to detect them.
+
+
+### Do any TLs invest in other TLs?
+
+```{r}
+tl.user_ids <- investment.events[, unique(tl_user_id)]
+invests.by.tl <- investment.events[user_id %in% tl.user_ids]
+
+invests.by.tl[, unique(user_id)]
+
+```
+
+Three investors were at one point trade leaders themselves:
+user 1 is a co-founder of the company, while users 11179 and 296 appear to be
+genuine members of the community.
+
+### Are any TLs friends?
+
+```{r}
+tl.friendships <- ld[user_id %in% tl.user_ids & alter_id %in% tl.user_ids]
+
+g <- graph.data.frame(tl.friendships)
+
+plot(g, vertex.size=4, vertex.label=NA,
+     edge.arrow.mode='-')
+
+```
+
+There are `r nrow(tl.friendships)/2` friendship ties among 
+`r tl.friendships[, length(unique(user_id))]` TLs.
+
